@@ -3,5 +3,4 @@ project(memory_alloc C)
 
 set(CMAKE_C_STANDARD 11)
 
-add_executable(memory_alloc main.c
-        memalloc.c)
+add_executable(memory_alloc main.c memalloc.c)

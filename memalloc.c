@@ -60,6 +60,7 @@ void *malloc(size_t size) {
     }
 
     header = block;
+    header->s.size = size;
     header->s.is_free = 0;
     header->s.next = NULL;
     if (!head) {
