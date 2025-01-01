@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <string.h>
-#include <printf.h>
+#include <stdio.h>
 
 struct header_t {
     size_t size;
