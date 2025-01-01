@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <string.h>
+#include <printf.h>
 
 struct header_t {
     size_t size;
@@ -144,4 +145,71 @@ void *realloc(void *block, size_t size) {
         free(block);
     }
     return ret;
+}
+
+// Debugging tool for memory leak
+struct allocation_info {
+    const char* file;
+    int line;
+    size_t size;
+    void* address;
+    struct allocation_info* next;
+};
+
+struct allocation_info* allocations = NULL;
+pthread_mutex_t debug_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void* debug_malloc(size_t size, const char* file, int line) {
+    void* ptr = malloc(size);
+
+    pthread_mutex_lock(&debug_lock);
+
+    struct allocation_info* info = malloc(sizeof(struct allocation_info));
+    info->file = file;
+    info->line = line;
+    info->size = size;
+    info->address = ptr;
+    info->next = allocations;
+    allocations = info;
+
+    pthread_mutex_unlock(&debug_lock);
+    return ptr;
+}
+
+void debug_free(void* ptr, const char* file, int line) {
+    pthread_mutex_lock(&debug_lock);
+
+    struct allocation_info** curr = &allocations;
+    while (*curr) {
+        if ((*curr)->address == ptr) {
+            struct allocation_info* to_free = *curr;
+            *curr = (*curr)->next;
+            free(to_free);
+            break;
+        }
+        curr = &(*curr)->next;
+    }
+
+    pthread_mutex_unlock(&debug_lock);
+    free(ptr);
+}
+
+void print_memory_leaks(void) {
+    pthread_mutex_lock(&debug_lock);
+
+    struct allocation_info* curr = allocations;
+    size_t total_leaks = 0;
+    size_t total_bytes = 0;
+
+    printf("\n=== Memory Leak Report ===\n");
+    while (curr) {
+        printf("Leak: %zu bytes allocated at %s:%d\n",
+               curr->size, curr->file, curr->line);
+        total_leaks++;
+        total_bytes += curr->size;
+        curr = curr->next;
+    }
+    printf("\nTotal: %zu leaks, %zu bytes\n", total_leaks, total_bytes);
+
+    pthread_mutex_unlock(&debug_lock);
 }

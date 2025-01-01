@@ -133,5 +133,19 @@ void run_all_tests() {
 
 int main() {
     run_all_tests();
+
+    int* p1 = malloc(sizeof(int));
+    *p1 = 42;
+    free(p1);  // No leak
+
+    // Test 2: Deliberate leak
+    int* p2 = malloc(sizeof(int) * 5);
+
+    // Test 3: Another leak
+    char* str = malloc(20);
+    strcpy(str, "Will be leaked");
+
+    print_memory_leaks();
+    return 0;
     return 0;
 }
