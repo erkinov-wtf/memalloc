@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <string.h>
 
 struct header_t {
     size_t size;
@@ -81,10 +82,10 @@ void free(void *block) {
     }
 
     pthread_mutex_lock(&global_malloc_lock);
-    header = (header_t*)block - 1;
+    header = (header_t *) block - 1;
 
     program_break = sbrk(0);
-    if ((char*)block + header->s.size == program_break) {
+    if ((char *) block + header->s.size == program_break) {
         if (head == tail) {
             head = NULL;
             tail = NULL;
@@ -104,4 +105,24 @@ void free(void *block) {
     }
     header->s.is_free = 1;
     pthread_mutex_unlock(&global_malloc_lock);
+}
+
+void *calloc(size_t num, size_t n_size) {
+    size_t size;
+    void *block;
+
+    if (!num || !n_size) {
+        return NULL;
+    }
+
+    size = num * n_size;
+    if (n_size != size / num) {
+        return NULL;
+    }
+    block = malloc(size);
+    if (!block) {
+        return NULL;
+    }
+    memset(block, 0, size);
+    return block;
 }
