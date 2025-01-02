@@ -1,14 +1,18 @@
 #include <stddef.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <pthread.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/mman.h>
+#include <errno.h>
+
+#define PAGE_SIZE 4096
+#define MIN_ALLOC_SIZE 32
 
 struct header_t {
     size_t size;
     unsigned is_free;
-    struct header_t *next; // linked list to keep track our malloc
+    struct header_t *next;
 };
 
 typedef char ALIGN[16];
@@ -23,8 +27,16 @@ union header {
 };
 typedef union header header_t;
 
-header_t *head, *tail;
-pthread_mutex_t global_malloc_lock;
+header_t *head = NULL, *tail = NULL;
+pthread_mutex_t global_malloc_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static size_t align_size(size_t size) {
+    return (size + sizeof(header_t) + 15) & ~15;
+}
+
+static size_t page_align(size_t size) {
+    return (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+}
 
 header_t *get_free_block(size_t size) {
     header_t *curr = head;
@@ -38,32 +50,40 @@ header_t *get_free_block(size_t size) {
 }
 
 void *malloc(size_t size) {
-    size_t total_size;
-    void *block;
-    header_t *header;
-    if (!size) {
-        return NULL;
-    }
+    if (!size) return NULL;
 
     pthread_mutex_lock(&global_malloc_lock);
-    header = get_free_block(size);
+
+    // Try to find a free block
+    header_t *header = get_free_block(size);
     if (header) {
         header->s.is_free = 0;
         pthread_mutex_unlock(&global_malloc_lock);
-        return (void *) (header + 1);
+        return (void*)(header + 1);
     }
 
-    total_size = sizeof(header_t) + size;
-    block = sbrk(total_size);
-    if (block == (void *) -1) {
+    // Calculate required size including header
+    size_t aligned_size = align_size(size);
+    size_t page_aligned_size = page_align(aligned_size);
+
+    // Map new memory
+    void *block = mmap(NULL, page_aligned_size,
+                       PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS,
+                       -1, 0);
+
+    if (block == MAP_FAILED) {
         pthread_mutex_unlock(&global_malloc_lock);
         return NULL;
     }
 
+    // Initialize header
     header = block;
     header->s.size = size;
     header->s.is_free = 0;
     header->s.next = NULL;
+
+    // Update linked list
     if (!head) {
         head = header;
     }
@@ -71,83 +91,71 @@ void *malloc(size_t size) {
         tail->s.next = header;
     }
     tail = header;
+
     pthread_mutex_unlock(&global_malloc_lock);
-    return (void *) (header + 1);
+    return (void*)(header + 1);
 }
 
 void free(void *block) {
-    header_t *header, *tmp;
-    void *program_break;
-
-    if (!block) {
-        return;
-    }
+    if (!block) return;
 
     pthread_mutex_lock(&global_malloc_lock);
-    header = (header_t *) block - 1;
 
-    program_break = sbrk(0);
-    if ((char *) block + header->s.size == program_break) {
-        if (head == tail) {
-            head = NULL;
-            tail = NULL;
-        } else {
-            tmp = head;
-            while (tmp) {
-                if (tmp->s.next == tail) {
-                    tmp->s.next = NULL;
-                    tail = tmp;
-                }
-                tmp = tmp->s.next;
-            }
+    header_t *header = (header_t*)block - 1;
+    size_t total_size = page_align(align_size(header->s.size));
+
+    // Remove from linked list
+    if (header == head) {
+        head = header->s.next;
+    } else {
+        header_t *curr = head;
+        while (curr && curr->s.next != header) {
+            curr = curr->s.next;
         }
-        sbrk(0 - sizeof(header_t) - header->s.size);
-        pthread_mutex_unlock(&global_malloc_lock);
-        return;
+        if (curr) {
+            curr->s.next = header->s.next;
+        }
+        if (header == tail) {
+            tail = curr;
+        }
     }
-    header->s.is_free = 1;
+
+    // Unmap the memory
+    munmap(header, total_size);
+
     pthread_mutex_unlock(&global_malloc_lock);
 }
 
-void *calloc(size_t num, size_t n_size) {
-    size_t size;
-    void *block;
+void *calloc(size_t num, size_t nsize) {
+    size_t size = num * nsize;
+    if (!num || !nsize || nsize != size / num) return NULL;
 
-    if (!num || !n_size) {
-        return NULL;
-    }
+    void *block = malloc(size);
+    if (!block) return NULL;
 
-    size = num * n_size;
-    if (n_size != size / num) {
-        return NULL;
-    }
-    block = malloc(size);
-    if (!block) {
-        return NULL;
-    }
     memset(block, 0, size);
     return block;
 }
 
 void *realloc(void *block, size_t size) {
-    header_t *header;
-    void *ret;
-    if (!block || !size) {
-        return malloc(size);
-    }
-    header = (header_t *) block - 1;
-    if (header->s.size >= size) {
-        return block;
-    }
-    ret = malloc(size);
-    if (ret) {
-        memcpy(ret, block, header->s.size);
+    if (!block) return malloc(size);
+    if (!size) {
         free(block);
+        return NULL;
     }
-    return ret;
+
+    header_t *header = (header_t*)block - 1;
+    if (header->s.size >= size) return block;
+
+    void *new_block = malloc(size);
+    if (!new_block) return NULL;
+
+    memcpy(new_block, block, header->s.size);
+    free(block);
+    return new_block;
 }
 
-// Debugging tool for memory leak
+// Your debug functions remain the same
 struct allocation_info {
     const char* file;
     int line;
@@ -163,7 +171,6 @@ void* debug_malloc(size_t size, const char* file, int line) {
     void* ptr = malloc(size);
 
     pthread_mutex_lock(&debug_lock);
-
     struct allocation_info* info = malloc(sizeof(struct allocation_info));
     info->file = file;
     info->line = line;
@@ -171,14 +178,13 @@ void* debug_malloc(size_t size, const char* file, int line) {
     info->address = ptr;
     info->next = allocations;
     allocations = info;
-
     pthread_mutex_unlock(&debug_lock);
+
     return ptr;
 }
 
 void debug_free(void* ptr, const char* file, int line) {
     pthread_mutex_lock(&debug_lock);
-
     struct allocation_info** curr = &allocations;
     while (*curr) {
         if ((*curr)->address == ptr) {
@@ -189,14 +195,12 @@ void debug_free(void* ptr, const char* file, int line) {
         }
         curr = &(*curr)->next;
     }
-
     pthread_mutex_unlock(&debug_lock);
     free(ptr);
 }
 
 void print_memory_leaks(void) {
     pthread_mutex_lock(&debug_lock);
-
     struct allocation_info* curr = allocations;
     size_t total_leaks = 0;
     size_t total_bytes = 0;
@@ -210,6 +214,5 @@ void print_memory_leaks(void) {
         curr = curr->next;
     }
     printf("\nTotal: %zu leaks, %zu bytes\n", total_leaks, total_bytes);
-
     pthread_mutex_unlock(&debug_lock);
 }
